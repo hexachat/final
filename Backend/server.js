@@ -34,8 +34,8 @@ app.get('/', (req, res) => {
     success: true,
     message: 'HexaChat API server is running',
     app: 'https://hexachat2.netlify.app',
-    health: '/api/health',
-    api: '/api'
+    api: 'https://hexachat-production.up.railway.app/api',
+    health: '/api/health'
   });
 });
 

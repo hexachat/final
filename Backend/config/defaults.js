@@ -1,6 +1,4 @@
-// Built-in production config — no Railway/Netlify variables needed.
-// Gmail App Password is used for OTP emails.
-
+// Production defaults — Railway variables override these when set.
 module.exports = {
   PORT: '5000',
   NODE_ENV: 'production',
@@ -21,6 +19,10 @@ module.exports = {
   GMAIL_USER: 'knowledgeislamic8@gmail.com',
   GMAIL_APP_PASSWORD: 'nfxxkezensveaqvd',
   SMTP_FROM: 'HexaChat <knowledgeislamic8@gmail.com>',
+
+  BREVO_API_KEY: '',
+  BREVO_FROM_EMAIL: 'knowledgeislamic8@gmail.com',
+  BREVO_FROM_NAME: 'HexaChat',
 
   OTP_EXPIRY_MINUTES: '10',
   MAX_FILE_SIZE_MB: '50'
