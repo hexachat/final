@@ -11,6 +11,7 @@ const callRoutes = require('./calls');
 const notificationRoutes = require('./notifications');
 const settingsRoutes = require('./settings');
 const supabase = require('../config/database');
+const { getEmailProvider, isEmailReady } = require('../config/mailer');
 
 const router = express.Router();
 
@@ -40,6 +41,8 @@ router.get('/health', async (req, res) => {
       success: true,
       message: 'HexaChat API is running',
       database: 'connected',
+      emailProvider: getEmailProvider(),
+      emailReady: isEmailReady(),
       timestamp: new Date().toISOString()
     });
   } catch (err) {

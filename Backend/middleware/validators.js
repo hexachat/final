@@ -14,7 +14,8 @@ const loginValidation = [
 
 const otpValidation = [
   body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  body('otp').trim().matches(/^\d{6}$/).withMessage('OTP must be 6 digits')
+  body('otp').trim().matches(/^\d{6}$/).withMessage('OTP must be 6 digits'),
+  body('type').optional().isIn(['signup', 'reset']).withMessage('Invalid OTP type')
 ];
 
 const emailValidation = [

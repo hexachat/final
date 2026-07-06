@@ -1,9 +1,35 @@
 const supabase = require('../config/database');
-const { sendOTPEmail, sendOTPEmailWithTimeout, sendOTPEmailAsync } = require('../config/mailer');
+const { sendOTPEmailWithTimeout, sendOTPEmailAsync } = require('../config/mailer');
 const { generateOTP, getOTPExpiry } = require('../utils/otp');
 const { hashPassword, comparePassword, sanitizeInput, formatPhone } = require('../utils/helpers');
 const { generateToken } = require('../utils/jwt');
-const { v4: uuidv4 } = require('uuid');
+
+async function saveAndSendOtp(cleanEmail, otp, type) {
+  const expiresAt = getOTPExpiry();
+
+  await supabase.from('otp_codes').delete().eq('email', cleanEmail).eq('type', type);
+
+  const { error: otpError } = await supabase.from('otp_codes').insert({
+    email: cleanEmail,
+    code: otp,
+    type,
+    expires_at: expiresAt.toISOString(),
+    used: false
+  });
+
+  if (otpError) {
+    throw new Error(otpError.message || 'Could not save OTP');
+  }
+
+  const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, type, 12000);
+  if (!emailResult.sent) sendOTPEmailAsync(cleanEmail, otp, type);
+
+  return emailResult;
+}
+
+function emailMessage(sent, successMsg, failMsg) {
+  return sent ? successMsg : failMsg;
+}
 
 async function signup({ name, email, phone_number, password }) {
   const cleanEmail = email.toLowerCase().trim();
@@ -22,21 +48,6 @@ async function signup({ name, email, phone_number, password }) {
 
   const passwordHash = await hashPassword(password);
   const otp = generateOTP();
-  const expiresAt = getOTPExpiry();
-
-  await supabase.from('otp_codes').delete().eq('email', cleanEmail).eq('type', 'signup');
-
-  const { error: otpError } = await supabase.from('otp_codes').insert({
-    email: cleanEmail,
-    code: otp,
-    type: 'signup',
-    expires_at: expiresAt.toISOString(),
-    used: false
-  });
-
-  if (otpError) {
-    throw new Error(otpError.message || 'Could not save OTP');
-  }
 
   if (existing) {
     const { error: updateError } = await supabase.from('users').update({
@@ -58,12 +69,14 @@ async function signup({ name, email, phone_number, password }) {
     if (userError) throw new Error(userError.message || 'Could not create account');
   }
 
-  const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, 'signup', 5000);
-  if (!emailResult.sent) sendOTPEmailAsync(cleanEmail, otp, 'signup');
+  const emailResult = await saveAndSendOtp(cleanEmail, otp, 'signup');
+
   return {
-    message: emailResult.sent
-      ? 'OTP sent to your email. Check inbox and spam folder.'
-      : 'Account created. Tap Resend OTP if email does not arrive.',
+    message: emailMessage(
+      emailResult.sent,
+      'OTP sent to your email. Check inbox and spam folder.',
+      'Account created. Tap Resend OTP if email does not arrive.'
+    ),
     email: cleanEmail,
     emailSent: !!emailResult.sent
   };
@@ -137,22 +150,14 @@ async function resendOTP(email, type = 'signup') {
   if (type === 'signup' && user.is_verified) throw new Error('Account already verified');
 
   const otp = generateOTP();
-  const expiresAt = getOTPExpiry();
+  const emailResult = await saveAndSendOtp(cleanEmail, otp, type);
 
-  await supabase.from('otp_codes').delete().eq('email', cleanEmail).eq('type', type);
-
-  await supabase.from('otp_codes').insert({
-    email: cleanEmail,
-    code: otp,
-    type,
-    expires_at: expiresAt.toISOString(),
-    used: false
-  });
-
-  const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, type, 5000);
-  if (!emailResult.sent) sendOTPEmailAsync(cleanEmail, otp, type);
   return {
-    message: emailResult.sent ? 'OTP sent to your email' : 'Could not send email. Try Resend OTP again.',
+    message: emailMessage(
+      emailResult.sent,
+      'OTP sent to your email',
+      'Could not send email. Try Resend OTP again.'
+    ),
     emailSent: !!emailResult.sent
   };
 }
@@ -173,18 +178,15 @@ async function login(email, password) {
 
   if (!user.is_verified) {
     const otp = generateOTP();
-    const expiresAt = getOTPExpiry();
-    await supabase.from('otp_codes').delete().eq('email', cleanEmail).eq('type', 'signup');
-    await supabase.from('otp_codes').insert({
-      email: cleanEmail, code: otp, type: 'signup',
-      expires_at: expiresAt.toISOString(), used: false
-    });
-    const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, 'signup', 5000);
-    if (!emailResult.sent) sendOTPEmailAsync(cleanEmail, otp, 'signup');
+    const emailResult = await saveAndSendOtp(cleanEmail, otp, 'signup');
     return {
       requiresVerification: true,
       email: cleanEmail,
-      message: emailResult.sent ? 'Please verify your email' : 'Please verify your email. Tap Resend OTP if needed.',
+      message: emailMessage(
+        emailResult.sent,
+        'Please verify your email',
+        'Please verify your email. Tap Resend OTP if needed.'
+      ),
       emailSent: !!emailResult.sent
     };
   }
@@ -202,17 +204,19 @@ async function login(email, password) {
 async function forgotPassword(email) {
   const cleanEmail = email.toLowerCase().trim();
   const { data: user } = await supabase.from('users').select('id').eq('email', cleanEmail).maybeSingle();
-  if (!user) return { message: 'If account exists, OTP has been sent' };
+  if (!user) return { message: 'If account exists, OTP has been sent', emailSent: true };
 
   const otp = generateOTP();
-  const expiresAt = getOTPExpiry();
-  await supabase.from('otp_codes').delete().eq('email', cleanEmail).eq('type', 'reset');
-  await supabase.from('otp_codes').insert({
-    email: cleanEmail, code: otp, type: 'reset',
-    expires_at: expiresAt.toISOString(), used: false
-  });
-  await sendOTPEmail(cleanEmail, otp, 'reset');
-  return { message: 'OTP sent to your email' };
+  const emailResult = await saveAndSendOtp(cleanEmail, otp, 'reset');
+
+  return {
+    message: emailMessage(
+      emailResult.sent,
+      'OTP sent to your email',
+      'Could not send OTP email. Try again.'
+    ),
+    emailSent: !!emailResult.sent
+  };
 }
 
 async function resetPassword(email, otp, newPassword) {

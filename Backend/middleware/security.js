@@ -59,6 +59,7 @@ function setupSecurity(app) {
   app.use('/api/auth/signup', authLimiter);
   app.use('/api/auth/forgot-password', otpLimiter);
   app.use('/api/auth/resend-otp', otpLimiter);
+  app.use('/api/auth/verify-otp', otpLimiter);
 }
 
 module.exports = { setupSecurity };

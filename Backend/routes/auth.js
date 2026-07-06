@@ -48,7 +48,13 @@ router.post('/login', loginValidation, validate, async (req, res) => {
   try {
     const result = await authService.login(req.body.email, req.body.password);
     if (result.requiresVerification) {
-      return res.json({ success: true, requiresVerification: true, email: result.email, message: result.message });
+      return res.json({
+        success: true,
+        requiresVerification: true,
+        email: result.email,
+        message: result.message,
+        emailSent: result.emailSent
+      });
     }
     res.cookie('token', result.token, {
       httpOnly: true, secure: env('NODE_ENV') === 'production',
