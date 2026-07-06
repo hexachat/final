@@ -3,49 +3,57 @@ const { env } = require('./env');
 
 const SMTP_USER = (env('SMTP_USER') || env('GMAIL_USER') || '').trim();
 const SMTP_PASS = (env('SMTP_PASS') || env('GMAIL_APP_PASSWORD') || '').replace(/\s/g, '');
-const RESEND_API_KEY = (env('RESEND_API_KEY') || '').trim();
-const BREVO_API_KEY = (env('BREVO_API_KEY') || '').trim();
 
-function isConfiguredKey(value) {
-  return !!(value && !value.includes('REPLACE_ME') && value !== 'your_api_key_here');
-}
-
-function createTransporter() {
-  if (!SMTP_USER || !SMTP_PASS) return null;
-  return nodemailer.createTransport({
-    host: env('SMTP_HOST') || 'smtp.gmail.com',
-    port: parseInt(env('SMTP_PORT') || '465', 10),
-    secure: env('SMTP_SECURE') !== 'false',
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-    connectionTimeout: 6000,
-    greetingTimeout: 6000,
-    socketTimeout: 8000
-  });
-}
-
-const transporter = createTransporter();
-
-function isResendConfigured() {
-  return isConfiguredKey(RESEND_API_KEY);
-}
-
-function isBrevoConfigured() {
-  return isConfiguredKey(BREVO_API_KEY);
-}
+const GMAIL_ATTEMPTS = [
+  {
+    name: 'gmail-service',
+    options: {
+      service: 'gmail',
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      connectionTimeout: 12000,
+      greetingTimeout: 12000,
+      socketTimeout: 15000
+    }
+  },
+  {
+    name: 'gmail-465',
+    options: {
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      connectionTimeout: 12000,
+      greetingTimeout: 12000,
+      socketTimeout: 15000,
+      tls: { minVersion: 'TLSv1.2' }
+    }
+  },
+  {
+    name: 'gmail-587',
+    options: {
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      connectionTimeout: 12000,
+      greetingTimeout: 12000,
+      socketTimeout: 15000,
+      tls: { minVersion: 'TLSv1.2' }
+    }
+  }
+];
 
 function isSmtpConfigured() {
-  return !!(SMTP_USER && SMTP_PASS && transporter);
+  return !!(SMTP_USER && SMTP_PASS);
 }
 
 function getEmailProvider() {
-  if (isResendConfigured()) return 'resend';
-  if (isBrevoConfigured()) return 'brevo';
-  if (isSmtpConfigured()) return 'gmail_smtp';
-  return 'none';
+  return isSmtpConfigured() ? 'gmail' : 'none';
 }
 
 function isEmailReady() {
-  return isResendConfigured() || isBrevoConfigured();
+  return isSmtpConfigured();
 }
 
 function buildOtpHtml(otp, type) {
@@ -68,80 +76,38 @@ function buildOtpHtml(otp, type) {
   `;
 }
 
-async function sendViaResend(to, subject, html) {
-  if (!isResendConfigured()) return { sent: false, reason: 'resend_not_configured' };
-
-  const from = env('RESEND_FROM') || 'HexaChat <onboarding@resend.dev>';
-  try {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${RESEND_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ from, to: [to], subject, html }),
-      signal: AbortSignal.timeout(12000)
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return { sent: false, reason: data.message || data.error || `Resend HTTP ${response.status}` };
-    }
-    console.log(`[OTP] Resend sent to ${to}`);
-    return { sent: true, provider: 'resend' };
-  } catch (err) {
-    return { sent: false, reason: err.message };
-  }
+async function trySendWithTransport(transport, mailOptions, timeoutMs = 15000) {
+  const sendPromise = transport.sendMail(mailOptions);
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('SMTP connection timed out')), timeoutMs);
+  });
+  await Promise.race([sendPromise, timeoutPromise]);
 }
 
-async function sendViaBrevo(to, subject, html) {
-  if (!isBrevoConfigured()) return { sent: false, reason: 'brevo_not_configured' };
-
-  const senderEmail = env('BREVO_FROM_EMAIL') || SMTP_USER || 'knowledgeislamic8@gmail.com';
-  const senderName = env('BREVO_FROM_NAME') || 'HexaChat';
-
-  try {
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'api-key': BREVO_API_KEY,
-        'Content-Type': 'application/json',
-        accept: 'application/json'
-      },
-      body: JSON.stringify({
-        sender: { name: senderName, email: senderEmail },
-        to: [{ email: to }],
-        subject,
-        htmlContent: html
-      }),
-      signal: AbortSignal.timeout(12000)
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return { sent: false, reason: data.message || `Brevo HTTP ${response.status}` };
-    }
-    console.log(`[OTP] Brevo sent to ${to}`);
-    return { sent: true, provider: 'brevo' };
-  } catch (err) {
-    return { sent: false, reason: err.message };
+async function sendViaGmail(to, subject, html) {
+  if (!isSmtpConfigured()) {
+    console.error('[OTP] Gmail SMTP not configured');
+    return { sent: false, reason: 'smtp_not_configured' };
   }
-}
-
-async function sendViaSmtp(to, subject, html) {
-  if (!isSmtpConfigured()) return { sent: false, reason: 'smtp_not_configured' };
 
   const from = env('SMTP_FROM') || `HexaChat <${SMTP_USER}>`;
-  const sendPromise = transporter.sendMail({ from, to, subject, html });
-  const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('SMTP connection timed out')), 8000);
-  });
+  const mailOptions = { from, to, subject, html };
 
-  try {
-    await Promise.race([sendPromise, timeoutPromise]);
-    console.log(`[OTP] Gmail SMTP sent to ${to}`);
-    return { sent: true, provider: 'gmail_smtp' };
-  } catch (err) {
-    return { sent: false, reason: err.message };
+  for (const attempt of GMAIL_ATTEMPTS) {
+    let transport;
+    try {
+      transport = nodemailer.createTransport(attempt.options);
+      await trySendWithTransport(transport, mailOptions, 15000);
+      console.log(`[OTP] Gmail sent to ${to} via ${attempt.name}`);
+      return { sent: true, provider: attempt.name };
+    } catch (err) {
+      console.error(`[OTP] ${attempt.name} failed for ${to}:`, err.message);
+    } finally {
+      if (transport) transport.close();
+    }
   }
+
+  return { sent: false, reason: 'gmail_all_attempts_failed' };
 }
 
 async function sendOTPEmail(to, otp, type = 'verification') {
@@ -152,25 +118,10 @@ async function sendOTPEmail(to, otp, type = 'verification') {
     login: 'HexaChat - Login OTP'
   };
 
-  const subject = subjects[type] || subjects.verification;
-  const html = buildOtpHtml(otp, type);
-
-  const providers = [sendViaResend, sendViaBrevo];
-  if (env('NODE_ENV') !== 'production') {
-    providers.push(sendViaSmtp);
-  }
-
-  for (const provider of providers) {
-    const result = await provider(to, subject, html);
-    if (result.sent) return result;
-    console.error(`[OTP] ${provider.name} failed for ${to}:`, result.reason);
-  }
-
-  console.error(`[OTP] All email providers failed for ${to}`);
-  return { sent: false, reason: 'all_providers_failed' };
+  return sendViaGmail(to, subjects[type] || subjects.verification, buildOtpHtml(otp, type));
 }
 
-async function sendOTPEmailWithTimeout(to, otp, type = 'signup', timeoutMs = 12000) {
+async function sendOTPEmailWithTimeout(to, otp, type = 'signup', timeoutMs = 20000) {
   return Promise.race([
     sendOTPEmail(to, otp, type),
     new Promise((resolve) => {
@@ -186,13 +137,10 @@ function sendOTPEmailAsync(to, otp, type = 'signup') {
 }
 
 module.exports = {
-  transporter,
   sendOTPEmail,
   sendOTPEmailWithTimeout,
   sendOTPEmailAsync,
   isSmtpConfigured,
-  isResendConfigured,
-  isBrevoConfigured,
   getEmailProvider,
   isEmailReady
 };

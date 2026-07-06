@@ -21,7 +21,7 @@ async function saveAndSendOtp(cleanEmail, otp, type) {
     throw new Error(otpError.message || 'Could not save OTP');
   }
 
-  const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, type, 12000);
+  const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, type, 20000);
   if (!emailResult.sent) sendOTPEmailAsync(cleanEmail, otp, type);
 
   return emailResult;
