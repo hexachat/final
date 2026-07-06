@@ -5,29 +5,26 @@ const SMTP_USER = (env('SMTP_USER') || env('GMAIL_USER') || '').trim();
 const SMTP_PASS = (env('SMTP_PASS') || env('GMAIL_APP_PASSWORD') || '').replace(/\s/g, '');
 
 function createTransporter() {
-  if (SMTP_USER && SMTP_PASS) {
-    return nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-      connectionTimeout: 8000,
-      greetingTimeout: 8000,
-      socketTimeout: 10000
-    });
+  if (!SMTP_USER || !SMTP_PASS) {
+    return null;
   }
+
   return nodemailer.createTransport({
     host: env('SMTP_HOST') || 'smtp.gmail.com',
-    port: parseInt(env('SMTP_PORT') || '587', 10),
-    secure: env('SMTP_SECURE') === 'true',
-    connectionTimeout: 8000,
-    greetingTimeout: 8000,
-    socketTimeout: 10000
+    port: parseInt(env('SMTP_PORT') || '465', 10),
+    secure: env('SMTP_SECURE') !== 'false',
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+    connectionTimeout: 6000,
+    greetingTimeout: 6000,
+    socketTimeout: 8000,
+    tls: { minVersion: 'TLSv1.2' }
   });
 }
 
 const transporter = createTransporter();
 
 function isSmtpConfigured() {
-  return !!(SMTP_USER && SMTP_PASS);
+  return !!(SMTP_USER && SMTP_PASS && transporter);
 }
 
 async function sendOTPEmail(to, otp, type = 'verification') {
@@ -69,7 +66,7 @@ async function sendOTPEmail(to, otp, type = 'verification') {
 
   const sendPromise = transporter.sendMail(mailOptions);
   const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('SMTP connection timed out')), 10000);
+    setTimeout(() => reject(new Error('SMTP connection timed out')), 8000);
   });
 
   try {
@@ -83,10 +80,25 @@ async function sendOTPEmail(to, otp, type = 'verification') {
   }
 }
 
+async function sendOTPEmailWithTimeout(to, otp, type = 'signup', timeoutMs = 6000) {
+  return Promise.race([
+    sendOTPEmail(to, otp, type),
+    new Promise((resolve) => {
+      setTimeout(() => resolve({ sent: false, reason: 'timeout' }), timeoutMs);
+    })
+  ]);
+}
+
 function sendOTPEmailAsync(to, otp, type = 'signup') {
   sendOTPEmail(to, otp, type).catch((err) => {
     console.error(`[OTP] Background send error for ${to}:`, err.message);
   });
 }
 
-module.exports = { transporter, sendOTPEmail, sendOTPEmailAsync, isSmtpConfigured };
+module.exports = {
+  transporter,
+  sendOTPEmail,
+  sendOTPEmailWithTimeout,
+  sendOTPEmailAsync,
+  isSmtpConfigured
+};

@@ -14,8 +14,8 @@ module.exports = {
   SUPABASE_SERVICE_ROLE_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5aGN2anlobGdwZXJudXZjeHVxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTcxNzMxMiwiZXhwIjoyMDk3MjkzMzEyfQ.zKwrvIqANgTkGKyKZsjUvRYKeZlS_bSbUxePW-bPtnc',
 
   SMTP_HOST: 'smtp.gmail.com',
-  SMTP_PORT: '587',
-  SMTP_SECURE: 'false',
+  SMTP_PORT: '465',
+  SMTP_SECURE: 'true',
   SMTP_USER: 'knowledgeislamic8@gmail.com',
   SMTP_PASS: 'nfxxkezensveaqvd',
   GMAIL_USER: 'knowledgeislamic8@gmail.com',

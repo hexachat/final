@@ -1,5 +1,5 @@
 const supabase = require('../config/database');
-const { sendOTPEmail, sendOTPEmailAsync } = require('../config/mailer');
+const { sendOTPEmail, sendOTPEmailWithTimeout, sendOTPEmailAsync } = require('../config/mailer');
 const { generateOTP, getOTPExpiry } = require('../utils/otp');
 const { hashPassword, comparePassword, sanitizeInput, formatPhone } = require('../utils/helpers');
 const { generateToken } = require('../utils/jwt');
@@ -58,11 +58,14 @@ async function signup({ name, email, phone_number, password }) {
     if (userError) throw new Error(userError.message || 'Could not create account');
   }
 
-  sendOTPEmailAsync(cleanEmail, otp, 'signup');
+  const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, 'signup', 5000);
+  if (!emailResult.sent) sendOTPEmailAsync(cleanEmail, otp, 'signup');
   return {
-    message: 'OTP sent to your email. Check inbox and spam folder.',
+    message: emailResult.sent
+      ? 'OTP sent to your email. Check inbox and spam folder.'
+      : 'Account created. Tap Resend OTP if email does not arrive.',
     email: cleanEmail,
-    emailSent: true
+    emailSent: !!emailResult.sent
   };
 }
 
@@ -146,8 +149,12 @@ async function resendOTP(email, type = 'signup') {
     used: false
   });
 
-  sendOTPEmailAsync(cleanEmail, otp, type);
-  return { message: 'OTP sent to your email', emailSent: true };
+  const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, type, 5000);
+  if (!emailResult.sent) sendOTPEmailAsync(cleanEmail, otp, type);
+  return {
+    message: emailResult.sent ? 'OTP sent to your email' : 'Could not send email. Try Resend OTP again.',
+    emailSent: !!emailResult.sent
+  };
 }
 
 async function login(email, password) {
@@ -172,8 +179,14 @@ async function login(email, password) {
       email: cleanEmail, code: otp, type: 'signup',
       expires_at: expiresAt.toISOString(), used: false
     });
-    sendOTPEmailAsync(cleanEmail, otp, 'signup');
-    return { requiresVerification: true, email: cleanEmail, message: 'Please verify your email' };
+    const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, 'signup', 5000);
+    if (!emailResult.sent) sendOTPEmailAsync(cleanEmail, otp, 'signup');
+    return {
+      requiresVerification: true,
+      email: cleanEmail,
+      message: emailResult.sent ? 'Please verify your email' : 'Please verify your email. Tap Resend OTP if needed.',
+      emailSent: !!emailResult.sent
+    };
   }
 
   await supabase.from('users').update({
