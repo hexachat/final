@@ -4,21 +4,44 @@ const { generateOTP, getOTPExpiry } = require('../utils/otp');
 const { hashPassword, comparePassword, sanitizeInput, formatPhone } = require('../utils/helpers');
 const { generateToken } = require('../utils/jwt');
 
-async function saveAndSendOtp(cleanEmail, otp, type) {
+async function getUserByEmail(cleanEmail) {
+  const { data: user } = await supabase
+    .from('users')
+    .select('id, email, is_verified')
+    .eq('email', cleanEmail)
+    .maybeSingle();
+  return user;
+}
+
+async function saveAndSendOtp(cleanEmail, otp, type, userId = null) {
   const expiresAt = getOTPExpiry();
+
+  if (!userId) {
+    const user = await getUserByEmail(cleanEmail);
+    userId = user?.id || null;
+  }
 
   await supabase.from('otp_codes').delete().eq('email', cleanEmail).eq('type', type);
 
-  const { error: otpError } = await supabase.from('otp_codes').insert({
+  const row = {
     email: cleanEmail,
     code: otp,
     type,
     expires_at: expiresAt.toISOString(),
     used: false
-  });
+  };
+  if (userId) row.user_id = userId;
+
+  const { error: otpError } = await supabase.from('otp_codes').insert(row);
 
   if (otpError) {
-    throw new Error(otpError.message || 'Could not save OTP');
+    if (otpError.message?.includes('user_id')) {
+      delete row.user_id;
+      const { error: retryError } = await supabase.from('otp_codes').insert(row);
+      if (retryError) throw new Error(retryError.message || 'Could not save OTP');
+    } else {
+      throw new Error(otpError.message || 'Could not save OTP');
+    }
   }
 
   const emailResult = await sendOTPEmailWithTimeout(cleanEmail, otp, type, 20000);
@@ -36,11 +59,7 @@ async function signup({ name, email, phone_number, password }) {
   const cleanPhone = formatPhone(phone_number);
   const cleanName = sanitizeInput(name);
 
-  const { data: existing } = await supabase
-    .from('users')
-    .select('id, is_verified')
-    .eq('email', cleanEmail)
-    .maybeSingle();
+  const existing = await getUserByEmail(cleanEmail);
 
   if (existing?.is_verified) {
     throw new Error('Email already registered');
@@ -48,6 +67,7 @@ async function signup({ name, email, phone_number, password }) {
 
   const passwordHash = await hashPassword(password);
   const otp = generateOTP();
+  let userId;
 
   if (existing) {
     const { error: updateError } = await supabase.from('users').update({
@@ -58,18 +78,20 @@ async function signup({ name, email, phone_number, password }) {
       updated_at: new Date().toISOString()
     }).eq('id', existing.id);
     if (updateError) throw new Error(updateError.message || 'Could not update account');
+    userId = existing.id;
   } else {
-    const { error: userError } = await supabase.from('users').insert({
+    const { data: newUser, error: userError } = await supabase.from('users').insert({
       name: cleanName,
       email: cleanEmail,
       phone_number: cleanPhone,
       password_hash: passwordHash,
       is_verified: false
-    });
+    }).select('id').single();
     if (userError) throw new Error(userError.message || 'Could not create account');
+    userId = newUser.id;
   }
 
-  const emailResult = await saveAndSendOtp(cleanEmail, otp, 'signup');
+  const emailResult = await saveAndSendOtp(cleanEmail, otp, 'signup', userId);
 
   return {
     message: emailMessage(
@@ -88,6 +110,11 @@ async function verifyOTP(email, otp, type = 'signup') {
 
   if (cleanOtp.length !== 6) {
     throw new Error('OTP must be 6 digits');
+  }
+
+  const user = await getUserByEmail(cleanEmail);
+  if (!user) {
+    throw new Error('Account not found for this email');
   }
 
   const { data: otpRecord, error } = await supabase
@@ -112,17 +139,17 @@ async function verifyOTP(email, otp, type = 'signup') {
   await supabase.from('otp_codes').update({ used: true }).eq('id', otpRecord.id);
 
   if (type === 'signup') {
-    const { data: user, error: userError } = await supabase
+    const { data: verifiedUser, error: userError } = await supabase
       .from('users')
       .update({ is_verified: true, updated_at: new Date().toISOString() })
-      .eq('email', cleanEmail)
+      .eq('id', user.id)
       .select('id, name, email, phone_number, profile_photo, bio, about, is_online, last_seen')
       .single();
 
     if (userError) throw userError;
 
     await supabase.from('user_settings').upsert({
-      user_id: user.id,
+      user_id: verifiedUser.id,
       dark_theme: true,
       notifications_enabled: true,
       sound_enabled: true,
@@ -130,8 +157,8 @@ async function verifyOTP(email, otp, type = 'signup') {
       last_seen_visible: true
     }, { onConflict: 'user_id' });
 
-    const token = generateToken({ userId: user.id, email: user.email });
-    return { user, token, message: 'Account verified successfully' };
+    const token = generateToken({ userId: verifiedUser.id, email: verifiedUser.email });
+    return { user: verifiedUser, token, message: 'Account verified successfully' };
   }
 
   return { message: 'OTP verified successfully', verified: true };
@@ -139,18 +166,13 @@ async function verifyOTP(email, otp, type = 'signup') {
 
 async function resendOTP(email, type = 'signup') {
   const cleanEmail = email.toLowerCase().trim();
-
-  const { data: user } = await supabase
-    .from('users')
-    .select('id, is_verified')
-    .eq('email', cleanEmail)
-    .maybeSingle();
+  const user = await getUserByEmail(cleanEmail);
 
   if (!user) throw new Error('User not found');
   if (type === 'signup' && user.is_verified) throw new Error('Account already verified');
 
   const otp = generateOTP();
-  const emailResult = await saveAndSendOtp(cleanEmail, otp, type);
+  const emailResult = await saveAndSendOtp(cleanEmail, otp, type, user.id);
 
   return {
     message: emailMessage(
@@ -178,7 +200,7 @@ async function login(email, password) {
 
   if (!user.is_verified) {
     const otp = generateOTP();
-    const emailResult = await saveAndSendOtp(cleanEmail, otp, 'signup');
+    const emailResult = await saveAndSendOtp(cleanEmail, otp, 'signup', user.id);
     return {
       requiresVerification: true,
       email: cleanEmail,
@@ -203,11 +225,11 @@ async function login(email, password) {
 
 async function forgotPassword(email) {
   const cleanEmail = email.toLowerCase().trim();
-  const { data: user } = await supabase.from('users').select('id').eq('email', cleanEmail).maybeSingle();
+  const user = await getUserByEmail(cleanEmail);
   if (!user) return { message: 'If account exists, OTP has been sent', emailSent: true };
 
   const otp = generateOTP();
-  const emailResult = await saveAndSendOtp(cleanEmail, otp, 'reset');
+  const emailResult = await saveAndSendOtp(cleanEmail, otp, 'reset', user.id);
 
   return {
     message: emailMessage(

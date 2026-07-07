@@ -1,9 +1,8 @@
 const nodemailer = require('nodemailer');
 const { env } = require('./env');
 
-const SMTP_USER = (env('SMTP_USER') || env('GMAIL_USER') || '').trim();
-const SMTP_PASS = (env('SMTP_PASS') || env('GMAIL_APP_PASSWORD') || '').replace(/\s/g, '');
-const BREVO_API_KEY = (env('BREVO_API_KEY') || '').trim();
+const SMTP_USER = env('GMAIL_USER');
+const SMTP_PASS = env('GMAIL_APP_PASSWORD');
 
 const GMAIL_ATTEMPTS = [
   {
@@ -19,9 +18,9 @@ const GMAIL_ATTEMPTS = [
   {
     name: 'gmail-465',
     options: {
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
+      host: env('SMTP_HOST') || 'smtp.gmail.com',
+      port: parseInt(env('SMTP_PORT') || '465', 10),
+      secure: env('SMTP_SECURE') !== 'false',
       auth: { user: SMTP_USER, pass: SMTP_PASS },
       connectionTimeout: 12000,
       greetingTimeout: 12000,
@@ -45,26 +44,16 @@ const GMAIL_ATTEMPTS = [
   }
 ];
 
-function hasKey(value) {
-  return !!(value && !value.includes('REPLACE_ME'));
-}
-
 function isSmtpConfigured() {
   return !!(SMTP_USER && SMTP_PASS);
 }
 
-function isBrevoConfigured() {
-  return hasKey(BREVO_API_KEY);
-}
-
 function getEmailProvider() {
-  if (isSmtpConfigured()) return 'gmail';
-  if (isBrevoConfigured()) return 'brevo';
-  return 'none';
+  return isSmtpConfigured() ? 'gmail' : 'none';
 }
 
 function isEmailReady() {
-  return isSmtpConfigured() || isBrevoConfigured();
+  return isSmtpConfigured();
 }
 
 function buildOtpHtml(otp, type) {
@@ -95,10 +84,22 @@ async function trySendWithTransport(transport, mailOptions, timeoutMs = 15000) {
   await Promise.race([sendPromise, timeoutPromise]);
 }
 
-async function sendViaGmail(to, subject, html) {
-  if (!isSmtpConfigured()) return { sent: false, reason: 'smtp_not_configured' };
+async function sendOTPEmail(to, otp, type = 'verification') {
+  if (!isSmtpConfigured()) {
+    console.error('[OTP] Gmail not configured — set GMAIL_USER and GMAIL_APP_PASSWORD');
+    return { sent: false, reason: 'smtp_not_configured' };
+  }
 
-  const from = env('SMTP_FROM') || `HexaChat <${SMTP_USER}>`;
+  const subjects = {
+    verification: 'HexaChat - Verify Your Email',
+    signup: 'HexaChat - Verify Your Email',
+    reset: 'HexaChat - Password Reset OTP',
+    login: 'HexaChat - Login OTP'
+  };
+
+  const subject = subjects[type] || subjects.verification;
+  const html = buildOtpHtml(otp, type);
+  const from = env('SMTP_FROM');
   const mailOptions = { from, to, subject, html };
 
   for (const attempt of GMAIL_ATTEMPTS) {
@@ -116,61 +117,6 @@ async function sendViaGmail(to, subject, html) {
   }
 
   return { sent: false, reason: 'gmail_all_attempts_failed' };
-}
-
-async function sendViaBrevo(to, subject, html) {
-  if (!isBrevoConfigured()) return { sent: false, reason: 'brevo_not_configured' };
-
-  const senderEmail = env('BREVO_FROM_EMAIL') || SMTP_USER;
-  const senderName = env('BREVO_FROM_NAME') || 'HexaChat';
-
-  try {
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'api-key': BREVO_API_KEY,
-        'Content-Type': 'application/json',
-        accept: 'application/json'
-      },
-      body: JSON.stringify({
-        sender: { name: senderName, email: senderEmail },
-        to: [{ email: to }],
-        subject,
-        htmlContent: html
-      }),
-      signal: AbortSignal.timeout(12000)
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return { sent: false, reason: data.message || `Brevo HTTP ${response.status}` };
-    }
-    console.log(`[OTP] Brevo sent to ${to}`);
-    return { sent: true, provider: 'brevo' };
-  } catch (err) {
-    return { sent: false, reason: err.message };
-  }
-}
-
-async function sendOTPEmail(to, otp, type = 'verification') {
-  const subjects = {
-    verification: 'HexaChat - Verify Your Email',
-    signup: 'HexaChat - Verify Your Email',
-    reset: 'HexaChat - Password Reset OTP',
-    login: 'HexaChat - Login OTP'
-  };
-
-  const subject = subjects[type] || subjects.verification;
-  const html = buildOtpHtml(otp, type);
-
-  const gmailResult = await sendViaGmail(to, subject, html);
-  if (gmailResult.sent) return gmailResult;
-
-  if (isBrevoConfigured()) {
-    console.warn(`[OTP] Gmail failed, trying Brevo for ${to}`);
-    return sendViaBrevo(to, subject, html);
-  }
-
-  return gmailResult;
 }
 
 async function sendOTPEmailWithTimeout(to, otp, type = 'signup', timeoutMs = 20000) {
@@ -193,7 +139,6 @@ module.exports = {
   sendOTPEmailWithTimeout,
   sendOTPEmailAsync,
   isSmtpConfigured,
-  isBrevoConfigured,
   getEmailProvider,
   isEmailReady
 };
